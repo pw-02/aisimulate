@@ -10,6 +10,7 @@
 //! provide placement/scaling policies; replay never depends back on Dynamo.
 
 mod agg;
+mod availability;
 mod artifact;
 mod canonical;
 mod capture;
@@ -106,6 +107,7 @@ pub(crate) fn normalize_trace_requests(
     Ok(requests.into())
 }
 
+pub use availability::{WorkerAvailabilityAction, WorkerAvailabilityEvent, WorkerAvailabilityStats, WorkerRecoveryMode, WorkerRecoveryPolicy};
 pub use crate::engine::{HandoffId, HandoffTransferTiming};
 pub use artifact::{
     ReplayArtifactHostOffloadEvent, ReplayArtifactHostOffloadEventData,
