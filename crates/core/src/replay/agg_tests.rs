@@ -68,6 +68,90 @@ fn runtime_with_startup_time(
     .unwrap()
 }
 
+fn hpc_reclaim_runtime(
+    pending: VecDeque<DirectRequest>,
+    recovery: WorkerRecoveryPolicy,
+) -> RoundRobinAggRuntime {
+    let config = ReplayEngineConfig {
+        rank: EngineConfig {
+            timing_model: TimingModelConfig::Fixed { prefill_ms: 1.0, decode_ms: 1.0 },
+            ..EngineConfig::default()
+        },
+        ..ReplayEngineConfig::default()
+    };
+    let factory = ReplayEngineFactory::new()
+        .role_factory(&config, WorkerStage::Aggregated, false)
+        .unwrap();
+    RoundRobinAggRuntime::new_composed(
+        factory,
+        AdmissionQueue::new_requests(pending, ReplayMode::Trace),
+        2, Some(5.0),
+        |dp_size, topology| Ok(AggregatedRoundRobinPlacement::new(dp_size, topology)),
+    ).unwrap()
+    .with_per_request_records(true)
+    .with_worker_availability(
+        vec![WorkerAvailabilityEvent {
+            time_ms: 0.5,
+            change: WorkerAvailabilityAction::Reclaim { worker_ids: vec![0] },
+        }],
+        recovery,
+    )
+}
+
+#[test]
+fn hpc_reclaimed_request_fails_without_retry() {
+    let (collector, stats) = hpc_reclaim_runtime(
+        VecDeque::from([request(100, 0.0)]),
+        WorkerRecoveryPolicy::default(),
+    ).run().unwrap();
+    let report = collector.finish();
+    assert_eq!(stats.availability.interrupted_attempts, 1);
+    assert_eq!(stats.availability.permanently_failed_requests, 1);
+    assert_eq!(report.request_counts.num_requests, 1);
+    assert_eq!(report.request_counts.completed_requests, 0);
+    assert_eq!(report.per_request[0].terminal_status, ReplayTerminalStatus::Failed);
+}
+
+#[test]
+fn hpc_full_restart_preserves_logical_request_and_completed_output() {
+    let mut req = request(101, 0.0);
+    req.max_output_tokens = 3;
+    let (collector, stats) = hpc_reclaim_runtime(
+        VecDeque::from([req]),
+        WorkerRecoveryPolicy { mode: WorkerRecoveryMode::Restart, max_restarts: 1 },
+    ).run().unwrap();
+    let report = collector.finish();
+    assert_eq!(stats.availability.interrupted_attempts, 1);
+    assert_eq!(stats.availability.restarted_attempts, 1);
+    assert_eq!(report.request_counts.num_requests, 1);
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(report.request_counts.total_output_tokens, 3);
+    assert_eq!(report.per_request[0].terminal_status, ReplayTerminalStatus::Completed);
+}
+
+#[test]
+fn hpc_starting_worker_can_be_reclaimed_before_readiness() {
+    let events = vec![
+        WorkerAvailabilityEvent {
+            time_ms: 0.0,
+            change: WorkerAvailabilityAction::Add { count: 1 },
+        },
+        WorkerAvailabilityEvent {
+            time_ms: 4.0,
+            change: WorkerAvailabilityAction::Reclaim { worker_ids: vec![1] },
+        },
+    ];
+    let (collector, stats) = runtime_with_startup_time(
+        VecDeque::from([request(102, 20.0)]),
+        Some(10.0),
+    ).with_worker_availability(events, WorkerRecoveryPolicy::default())
+        .run().unwrap();
+    assert_eq!(collector.finish().request_counts.completed_requests, 1);
+    assert_eq!(stats.availability.added_workers, 1);
+    assert_eq!(stats.availability.reclaimed_workers, 1);
+    assert_eq!(stats.availability.interrupted_attempts, 0);
+}
+
 #[test]
 fn telemetry_only_timestamps_do_not_enter_the_agg_semantic_drain() {
     let pending = VecDeque::from([request(1, 10.0)]);
