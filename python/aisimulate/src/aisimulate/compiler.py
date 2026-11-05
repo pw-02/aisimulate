@@ -58,6 +58,12 @@ def prediction_to_replay_spec(
     if config.engine.speculation is not None and execution_mode != "offline":
         raise ValueError("speculation requires offline execution")
     workload, concurrency = _traffic(config)
+    if config.hpc is not None:
+        if execution_mode != "offline":
+            raise ValueError("hpc availability requires offline prediction")
+        # Dynamically changing worker availability is a Dynamo-only capability.
+        # The engine-only runner must explicitly reject this workload key.
+        workload["hpc"] = config.hpc.model_dump(mode="json")
     deployment = _deployment(
         config.engine,
         workload=workload,
