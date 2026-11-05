@@ -596,6 +596,7 @@ impl<C: ReplayComposition> Replayer<C> {
             ));
         }
 
+        let mut availability_stats = None;
         let collector = match &self.spec.topology {
             ReplayTopology::Aggregated { workers } => {
                 let mut role_factory = self.factory.role_factory(
@@ -673,7 +674,11 @@ impl<C: ReplayComposition> Replayer<C> {
                         Box::new(TelemetryObserverBoundary(observer)),
                     );
                 }
-                runtime.run().map_err(runtime_error)?.0
+                let (collector, stats) = runtime.run().map_err(runtime_error)?;
+                if !self.worker_events.is_empty() {
+                    availability_stats = Some(stats.availability);
+                }
+                collector
             }
             ReplayTopology::Disaggregated {
                 prefill,
@@ -761,6 +766,7 @@ impl<C: ReplayComposition> Replayer<C> {
         if let Some(capture) = telemetry_capture {
             report.telemetry = Some(capture.finish(&mut report, retain_per_request));
         }
+        report.worker_availability = availability_stats;
         report.kv_eviction_policy = engine_config.kv_eviction_policy;
         report.kv_eviction_assumption = (engine_config.kv_eviction_policy
             == KvEvictionPolicy::Belady)
