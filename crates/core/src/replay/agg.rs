@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::artifact::{ReplayArtifactRequest, ReplayArtifactSink};
-use super::availability::{WorkerAvailabilityAction, WorkerAvailabilityEvent, WorkerRecoveryMode, WorkerRecoveryPolicy};
+use super::availability::{WorkerAvailabilityAction, WorkerAvailabilityEvent, WorkerRecoveryMode, WorkerRecoveryPolicy, WorkerAvailabilityStats};
 use super::events::SimulationEventKind;
 pub(super) use super::components::ReplayMode;
 use super::core::{
@@ -54,6 +54,7 @@ use crate::engine::TimingModel;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct AggRuntimeStats {
+    pub(crate) availability: WorkerAvailabilityStats,
     #[cfg(test)]
     semantic_drain_count: usize,
 }
@@ -1203,6 +1204,7 @@ where
             let event = self.worker_events.pop_front().expect("checked availability event");
             match event.change {
                 WorkerAvailabilityAction::Add { count } => {
+                    self.stats.availability.added_workers += count;
                     let target = self.engine.non_draining_group_count()
                         .checked_add(count)
                         .context("HPC add event overflows worker count")?;
@@ -1218,6 +1220,8 @@ where
     }
 
     fn apply_immediate_reclaim(&mut self, worker_ids: &[usize]) -> anyhow::Result<()> {
+        self.stats.availability.reclaim_events += 1;
+        self.stats.availability.reclaimed_workers += worker_ids.len();
         // Capture topology before the engine destroys the workers.
         let topologies = worker_ids.iter().map(|&id| {
             self.engine.worker_topology(id)
@@ -1229,6 +1233,7 @@ where
             placements.extend(self.placement.worker_draining(topology.clone(), self.now_ms)?);
         }
         let interrupted = self.engine.force_remove_workers(worker_ids)?;
+        self.stats.availability.interrupted_attempts += interrupted.len();
 
         // BinaryHeap::retain prevents stale EnginePassCompletion events from
         // trying to complete a pass whose native Engine was just destroyed.
@@ -1261,10 +1266,12 @@ where
             {
                 let request = self.original_requests.get(&uuid).cloned()
                     .with_context(|| format!("restart requested for {uuid} without original prompt"))?;
+                self.stats.availability.restarted_attempts += 1;
                 self.restart_counts.insert(uuid, attempts + 1);
                 self.collector.on_full_request_restart(uuid);
                 restart.push(request);
             } else {
+                self.stats.availability.permanently_failed_requests += 1;
                 self.original_requests.remove(&uuid);
                 self.restart_counts.remove(&uuid);
                 self.collector.on_terminal(uuid, self.now_ms, ReplayTerminalStatus::Failed);
