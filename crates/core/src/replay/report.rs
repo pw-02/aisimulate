@@ -39,6 +39,8 @@ pub struct G2DomainStats {
 /// Canonical replay result returned by [`crate::replay::Replayer`].
 #[derive(Debug, Clone)]
 pub struct ReplayReport {
+    /// Present for trace-driven HPC availability experiments only.
+    pub worker_availability: Option<super::availability::WorkerAvailabilityStats>,
     pub kv_eviction_policy: crate::engine::KvEvictionPolicy,
     /// Versioned forecast contract, present only for a lookahead eviction policy.
     pub kv_eviction_assumption: Option<&'static str>,
@@ -419,6 +421,9 @@ impl Serialize for ReplayReport {
             power.validate().map_err(serde::ser::Error::custom)?;
         }
         let mut map = serializer.serialize_map(None)?;
+        if let Some(stats) = &self.worker_availability {
+            map.serialize_entry("worker_availability", stats)?;
+        }
         map.serialize_entry("kv_eviction_policy", &self.kv_eviction_policy)?;
         if let Some(assumption) = self.kv_eviction_assumption {
             map.serialize_entry("kv_eviction_assumption", assumption)?;
@@ -1643,6 +1648,16 @@ impl TraceCollector {
         }
     }
 
+    /// A full restart discards output from the failed execution without
+    /// resetting the original user arrival timestamp.
+    pub(crate) fn on_full_request_restart(&mut self, uuid: Uuid) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.token_timeline = TokenTimeline::default();
+            stats.decode_worker_idx = None;
+            stats.prefill_worker_idx = None;
+        }
+    }
+
     pub fn on_terminal(&mut self, uuid: Uuid, terminal_time_ms: f64, status: ReplayTerminalStatus) {
         let Self {
             requests,
@@ -1943,6 +1958,7 @@ impl TraceCollector {
             output_throughput_tok_s: goodput_output_tokens as f64 / duration_s,
         });
         ReplayReport {
+            worker_availability: None,
             kv_eviction_policy: crate::engine::KvEvictionPolicy::Lru,
             kv_eviction_assumption: None,
             committed_prefill_tokens: self.committed_prefill_tokens,
