@@ -1262,6 +1262,7 @@ where
                 let request = self.original_requests.get(&uuid).cloned()
                     .with_context(|| format!("restart requested for {uuid} without original prompt"))?;
                 self.restart_counts.insert(uuid, attempts + 1);
+                self.collector.on_full_request_restart(uuid);
                 restart.push(request);
             } else {
                 self.original_requests.remove(&uuid);
