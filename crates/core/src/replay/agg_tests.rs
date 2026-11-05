@@ -137,7 +137,9 @@ fn hpc_add_respects_worker_startup_delay() {
     run.ensure_drive_started().unwrap();
     assert_eq!(run.engine.starting_group_ids(), vec![1]);
     assert_eq!(run.engine.active_group_ids(), vec![0]);
-    run.step_dynamic_until(10.0).unwrap();
+    while run.now_ms < 10.0 {
+        assert!(matches!(run.step().unwrap(), ReplayStepOutcome::Settled { .. }));
+    }
     assert!(run.engine.active_group_ids().contains(&1));
 }
 
