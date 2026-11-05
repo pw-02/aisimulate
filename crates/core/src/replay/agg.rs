@@ -564,9 +564,9 @@ where
     /// True if the event heap is empty or contains only "idle" events that carry no
     /// pending request work: `WorkerReady` or a re-armed control heartbeat.
     fn only_idle_events_remain(&self) -> bool {
-        if !self.worker_events.is_empty() {
-            return false;
-        }
+        // Future capacity events do not extend a replay whose complete
+        // workload has already finished. Arrivals still advance the timeline
+        // through next_timestamps while admission has outstanding requests.
         use super::events::SimulationEventKind;
         self.events.iter().all(|e| {
             matches!(
