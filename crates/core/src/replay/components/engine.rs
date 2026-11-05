@@ -386,11 +386,11 @@ where
         Ok(worker_id)
     }
 
-    fn tombstone_worker(&mut self, worker_id: usize) -> Result<bool> {
+    fn tombstone_worker(&mut self, worker_id: usize, force: bool) -> Result<bool> {
         let Some(worker) = self.workers.get(worker_id).and_then(Option::as_ref) else {
             return Ok(false);
         };
-        if !worker.engine.is_drained() || worker.pending_pass.is_some() {
+        if !force && (!worker.engine.is_drained() || worker.pending_pass.is_some()) {
             bail!("cannot remove non-drained generalized engine {worker_id}");
         }
         let worker_in_flight = worker.total_in_flight();
@@ -457,6 +457,28 @@ where
         Ok(true)
     }
 
+    /// Reclaim a group atomically without waiting for its running requests.
+    /// Native pass completions belonging to these workers are invalid after
+    /// this call; the replay coordinator removes their pending event entries.
+    pub(crate) fn force_remove_workers(&mut self, worker_ids: &[usize]) -> Result<Vec<Uuid>> {
+        let unique = worker_ids.iter().copied().collect::<BTreeSet<_>>();
+        anyhow::ensure!(unique.len() == worker_ids.len(), "duplicate worker reclaim ID");
+        let mut interrupted = BTreeSet::new();
+        for &id in worker_ids {
+            let worker = self.workers.get(id).and_then(Option::as_ref)
+                .with_context(|| format!("cannot reclaim unknown worker {id}"))?;
+            for rank in &worker.in_flight_by_rank {
+                interrupted.extend(rank.iter().copied());
+            }
+        }
+        for &id in worker_ids {
+            self.tombstone_worker(id, true)?;
+            self.pending_removal.remove(&id);
+            self.pending_startup.remove(&id);
+        }
+        Ok(interrupted.into_iter().collect())
+    }
+
     pub(crate) fn mark_for_removal(&mut self, worker_id: usize) {
         self.pending_removal.insert(worker_id);
     }
@@ -480,7 +502,7 @@ where
         let mut removed = Vec::with_capacity(removable.len());
         for worker_id in removable {
             if self
-                .tombstone_worker(worker_id)
+                .tombstone_worker(worker_id, false)
                 .with_context(|| format!("failed to remove drained worker {worker_id}"))?
             {
                 removed.push(worker_id);
@@ -525,7 +547,7 @@ where
                 .collect::<Vec<_>>();
             for id in &to_cancel {
                 if self
-                    .tombstone_worker(*id)
+                    .tombstone_worker(*id, false)
                     .with_context(|| format!("failed to cancel starting worker {id}"))?
                 {
                     removed.push(*id);
@@ -2405,7 +2427,7 @@ mod tests {
         assert_eq!(source(&component, worker0[0], Some(2)).unwrap(), None);
         // A hint resolved before the drain is dropped when it is finally dispatched.
         assert_eq!(component.live_kv_hint(resolved), None);
-        assert!(component.tombstone_worker(1).unwrap());
+        assert!(component.tombstone_worker(1, false).unwrap());
         assert_eq!(source(&component, worker0[0], Some(2)).unwrap(), None);
 
         // Without KVCR no worker advertises router hints and every hint is ignored.
@@ -2426,7 +2448,7 @@ mod tests {
             dp_rank: 1,
         };
         assert!(registry.lock().unwrap().source(rank1(1)).is_some());
-        assert!(component.tombstone_worker(1).unwrap());
+        assert!(component.tombstone_worker(1, false).unwrap());
         let registry = registry.lock().unwrap();
         assert!(registry.source(rank1(1)).is_none());
         assert!(registry.source(rank1(0)).is_some());
