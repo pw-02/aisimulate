@@ -2610,7 +2610,7 @@ mod tests {
         assert_eq!(source(&component, worker0[0], Some(2)).unwrap(), None);
         // A hint resolved before the drain is dropped when it is finally dispatched.
         assert_eq!(component.live_kv_hint(resolved), None);
-        assert!(component.tombstone_worker(1).unwrap());
+        assert!(component.tombstone_worker(1, false).unwrap());
         assert_eq!(source(&component, worker0[0], Some(2)).unwrap(), None);
 
         // Without KVCR no worker advertises router hints and every hint is ignored.
@@ -2631,7 +2631,7 @@ mod tests {
             dp_rank: 1,
         };
         assert!(registry.lock().unwrap().source(rank1(1)).is_some());
-        assert!(component.tombstone_worker(1).unwrap());
+        assert!(component.tombstone_worker(1, false).unwrap());
         let registry = registry.lock().unwrap();
         assert!(registry.source(rank1(1)).is_none());
         assert!(registry.source(rank1(0)).is_some());
