@@ -43,6 +43,18 @@ impl Default for WorkerRecoveryPolicy {
     }
 }
 
+/// Research-specific counters. Successful logical requests remain counted only
+/// once in ReplayReport.request_counts; these measure discarded attempts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct WorkerAvailabilityStats {
+    pub added_workers: usize,
+    pub reclaimed_workers: usize,
+    pub reclaim_events: usize,
+    pub interrupted_attempts: usize,
+    pub restarted_attempts: usize,
+    pub permanently_failed_requests: usize,
+}
+
 pub(crate) fn validate_events(events: &[WorkerAvailabilityEvent]) -> anyhow::Result<()> {
     let mut previous = 0.0;
     for (index, event) in events.iter().enumerate() {
