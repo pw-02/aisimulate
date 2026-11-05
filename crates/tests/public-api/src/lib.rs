@@ -1252,6 +1252,7 @@ pub fn rebuild_replay_report_literals(
     use aisimulate_core::{ReplayReport, replay::PerRequestRecord};
     (
         ReplayReport {
+            worker_availability: report.worker_availability,
             telemetry: report.telemetry,
             kv_eviction_policy: report.kv_eviction_policy,
             kv_eviction_assumption: report.kv_eviction_assumption,
