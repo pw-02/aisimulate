@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::artifact::{ReplayArtifactRequest, ReplayArtifactSink};
+use super::availability::{WorkerAvailabilityAction, WorkerAvailabilityEvent, WorkerAvailabilityStats, WorkerRecoveryMode, WorkerRecoveryPolicy};
+use super::events::SimulationEventKind;
 pub(super) use super::components::ReplayMode;
 use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, Placement, PlacementDecision,
@@ -39,11 +41,12 @@ use crate::replay::{ReplayCaptureOptions, ReplayRequestPool};
 use crate::replay::{ReplayTerminalStatus, TraceCollector};
 use anyhow::{Context, bail};
 use rustc_hash::FxHashMap;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque, BTreeSet};
 use uuid::Uuid;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct AggRuntimeStats {
+    pub(crate) availability: WorkerAvailabilityStats,
     #[cfg(test)]
     semantic_drain_count: usize,
 }
@@ -65,6 +68,10 @@ where
     artifact_sink: Option<ReplayArtifactSink>,
     evidence: ReplayEvidenceCollector,
     events: BinaryHeap<SimulationEvent<Observation::Batch>>,
+    worker_events: VecDeque<WorkerAvailabilityEvent>,
+    recovery: WorkerRecoveryPolicy,
+    original_requests: FxHashMap<Uuid, DirectRequest>,
+    restart_counts: FxHashMap<Uuid, usize>,
     placement: PlacementPolicyImpl,
     progress: ReplayProgress,
     stats: AggRuntimeStats,
@@ -152,6 +159,10 @@ where
             artifact_sink: None,
             evidence: ReplayEvidenceCollector::default(),
             events: BinaryHeap::new(),
+            worker_events: VecDeque::new(),
+            recovery: WorkerRecoveryPolicy::default(),
+            original_requests: FxHashMap::default(),
+            restart_counts: FxHashMap::default(),
             placement,
             progress,
             stats: AggRuntimeStats::default(),
@@ -173,6 +184,16 @@ where
             profile_canceled_requests: 0,
             profile_unsettled_requests: 0,
         })
+    }
+
+    pub(crate) fn with_worker_availability(
+        mut self,
+        events: Vec<WorkerAvailabilityEvent>,
+        recovery: WorkerRecoveryPolicy,
+    ) -> Self {
+        self.worker_events = events.into();
+        self.recovery = recovery;
+        self
     }
 
     pub(crate) fn with_sla_thresholds(mut self, sla: crate::replay::SlaThresholds) -> Self {
@@ -331,6 +352,7 @@ where
         arrival_time_ms: f64,
         metadata: Metadata,
         session_id: Option<String>,
+        restarting: bool,
     ) -> anyhow::Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         let input_length = request.input_length();
@@ -340,6 +362,13 @@ where
             request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
         }
 
+        // Retain materialized originals only when restart mode is enabled.
+        // Deferred compact prompts are materialized once at original arrival.
+        if self.recovery.mode == WorkerRecoveryMode::Restart && !restarting {
+            let mut original = request.metadata().clone();
+            original.tokens = request.prompt_tokens();
+            self.original_requests.insert(uuid, original);
+        }
         let effects = self
             .placement
             .place(&request, metadata, session_id, self.now_ms)?;
@@ -351,12 +380,14 @@ where
                 placement.request_id
             );
         }
-        self.collector
-            .try_on_arrival(uuid, arrival_time_ms, input_length, output_length)?;
-        if let Some(context) = request.metadata().replay_context.as_ref() {
-            self.collector.on_request_context(uuid, context);
+        if !restarting {
+            self.collector
+                .try_on_arrival(uuid, arrival_time_ms, input_length, output_length)?;
+            if let Some(context) = request.metadata().replay_context.as_ref() {
+                self.collector.on_request_context(uuid, context);
+            }
+            self.traffic.on_arrival();
         }
-        self.traffic.on_arrival();
         match effects.decision {
             PlacementDecision::Immediate(placement) => {
                 self.record_placement(placement);
@@ -471,12 +502,19 @@ where
             CoreAdmissionSource::next_ready_time_ms(&mut self.admission),
             profile_deadline,
         );
-        let next_event_ms = self.events.peek().map(|event| event.at_ms);
+        let next_event_ms = choose_next_timestamp(
+            self.events.peek().map(|event| event.at_ms),
+            self.worker_events.front().map(|event| event.time_ms),
+        );
         let next_canonical_event_ms = if self.telemetry.is_some() {
             next_non_telemetry_event_ms(&mut self.events)
         } else {
             next_event_ms
         };
+        let next_canonical_event_ms = choose_next_timestamp(
+            next_canonical_event_ms,
+            self.worker_events.front().map(|event| event.time_ms),
+        );
         let next_internal_deadline_ms = self.engine.next_internal_deadline_ms();
         (
             choose_next_timestamp(
@@ -536,6 +574,8 @@ where
                 self.step_freed_slot = true;
                 self.step_terminals.push((signal.uuid, status));
             }
+            self.original_requests.remove(&signal.uuid);
+            self.restart_counts.remove(&signal.uuid);
             let placements = self.placement.request_terminal(signal.uuid, self.now_ms)?;
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
@@ -694,7 +734,7 @@ where
             let session_metadata = session_id.clone().zip(turn_index);
             let placement_session_id = session_id.filter(|_| !synthetic_session_id);
             let uuid =
-                self.assign_request(request, arrival_time_ms, metadata, placement_session_id)?;
+                self.assign_request(request, arrival_time_ms, metadata, placement_session_id, false)?;
             if let (Some(request_id), Some(play_id)) = (authored_request_id, play_id) {
                 self.collector
                     .on_agentic_metadata(uuid, request_id, play_id, dispatched_at_ms);
@@ -855,6 +895,129 @@ where
         Ok(changed)
     }
 
+    /// Apply external capacity changes before completing passes at the same
+    /// instant. A batch is observed atomically by the placement policy.
+    fn apply_worker_availability_events(&mut self) -> anyhow::Result<bool> {
+        let mut changed = false;
+        while self.worker_events.front().is_some_and(|event| event.time_ms == self.now_ms) {
+            let event = self.worker_events.pop_front().expect("checked availability event");
+            match event.change {
+                WorkerAvailabilityAction::Add { count } => {
+                    let target = self.engine.non_draining_group_count()
+                        .checked_add(count)
+                        .context("worker addition count overflow")?;
+                    self.apply_scaling_with_tick(target, None)?;
+                    self.stats.availability.added_workers += count;
+                }
+                WorkerAvailabilityAction::Reclaim { worker_ids } => {
+                    self.reclaim_workers(&worker_ids)?;
+                }
+            }
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn reclaim_workers(&mut self, worker_ids: &[usize]) -> anyhow::Result<()> {
+        let starting = self.engine.starting_group_ids();
+        let topologies = worker_ids.iter().map(|&id| {
+            self.engine.worker_topology(id)
+                .with_context(|| format!("cannot reclaim worker {id}"))
+        }).collect::<anyhow::Result<Vec<_>>>()?;
+        // Prevent any future routing to these workers before final teardown.
+        let mut released = Vec::new();
+        for topology in &topologies {
+            if !starting.contains(&topology.worker_id) {
+                released.extend(self.placement.worker_draining(topology.clone(), self.now_ms)?);
+            }
+        }
+        let interrupted = self.engine.force_remove_workers(worker_ids)?;
+        let failed_workers = worker_ids.iter().copied().collect::<BTreeSet<_>>();
+        self.events.retain(|event| match &event.kind {
+            SimulationEventKind::EnginePassCompletion(pass) => {
+                !failed_workers.contains(&pass.worker_id)
+            }
+            SimulationEventKind::WorkerReady { worker_id, .. } => {
+                !failed_workers.contains(worker_id)
+            }
+            _ => true,
+        });
+        self.collector.clear_static_worker_count();
+        self.stats.availability.reclaim_events += 1;
+        self.stats.availability.reclaimed_workers += worker_ids.len();
+        self.stats.availability.interrupted_attempts += interrupted.len();
+        for &id in worker_ids {
+            self.fpm_buffer.retire_worker(id);
+        }
+        let mut restart = Vec::new();
+        for uuid in interrupted {
+            self.requests.remove(&uuid)
+                .with_context(|| format!("reclaimed request {uuid} is missing runtime state"))?;
+            released.extend(self.placement.request_terminal(uuid, self.now_ms)?);
+            let count = self.restart_counts.get(&uuid).copied().unwrap_or(0);
+            if self.recovery.mode == WorkerRecoveryMode::Restart
+                && count < self.recovery.max_restarts
+                && !self.engine.active_group_ids().is_empty()
+            {
+                let original = self.original_requests.get(&uuid).cloned()
+                    .with_context(|| format!("missing original payload for restart of {uuid}"))?;
+                self.restart_counts.insert(uuid, count + 1);
+                self.stats.availability.restarted_attempts += 1;
+                self.collector.on_full_request_restart(uuid);
+                restart.push(original);
+            } else {
+                self.original_requests.remove(&uuid);
+                self.restart_counts.remove(&uuid);
+                self.stats.availability.permanently_failed_requests += 1;
+                self.collector.on_terminal(uuid, self.now_ms, ReplayTerminalStatus::Failed);
+                self.admission.defer_terminal(uuid, self.now_ms, ReplayTerminalStatus::Failed)?;
+                if !self.admission.knows_preparation_request(uuid) {
+                    self.progress.inc_completed();
+                }
+                if self.defer_drive {
+                    self.step_terminals.push((uuid, ReplayTerminalStatus::Failed));
+                    self.step_freed_slot = true;
+                }
+            }
+        }
+        for topology in topologies {
+            if !starting.contains(&topology.worker_id) {
+                released.extend(self.placement.worker_removed(topology, self.now_ms)?);
+            }
+        }
+        self.dispatch_placements(released)?;
+        let settled = self.placement.topology_settled(self.now_ms)?;
+        self.dispatch_placements(settled)?;
+        if self.evidence.options().capture_lifecycle_evidence {
+            let transitions = worker_ids.iter().map(|&worker_id| WorkerLifecycleTransition {
+                worker_id,
+                transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                prior_state: Some(if starting.contains(&worker_id) { "starting" } else { "active" }),
+                state: "removed",
+                reason: Some("hpc_reclamation"),
+                origin_operation_ordinal: None,
+            }).collect();
+            let state = self.lifecycle_state();
+            self.evidence.record_lifecycle_operation(
+                self.now_ms, WorkerPool::Agg, "hpc_reclamation",
+                None, None, transitions, state, Vec::new(),
+            );
+        }
+        for original in restart {
+            let session = original.replay_context.as_ref()
+                .and_then(|context| context.session_id())
+                .map(str::to_owned);
+            self.assign_request(
+                ReplayRequestPayload::materialized(original),
+                self.now_ms,
+                Metadata::from_hashes(None),
+                session,
+                true,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
         #[cfg(test)]
@@ -863,7 +1026,7 @@ where
         }
         let mut consecutive_internal_steps = 0usize;
         loop {
-            let mut changed = false;
+            let mut changed = self.apply_worker_availability_events()?;
             // Settle idle deadlines first: a completion below may release a
             // queued placement and submit it to that same idle worker.
             changed |= self.settle_internal_work(&mut consecutive_internal_steps)?;
