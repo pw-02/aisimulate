@@ -23,6 +23,11 @@ pub(super) struct LatestFpmBuffer {
 }
 
 impl LatestFpmBuffer {
+    pub(super) fn retire_worker(&mut self, worker_id: usize) {
+        self.snapshots.retain(|(id, _), _| *id != worker_id);
+        self.last_publish_ms.retain(|(id, _), _| *id != worker_id);
+    }
+
     pub(super) fn activate_worker(&mut self, worker_id: usize, dp_size: u32, now_ms: f64) {
         for dp_rank in 0..dp_size.max(1) {
             self.last_publish_ms

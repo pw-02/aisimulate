@@ -307,6 +307,8 @@ pub struct Replayer<C = RoundRobinComposition> {
     factory: ReplayEngineFactory,
     composition: C,
     runtime_input: Option<ReplayRuntimeInput>,
+    worker_events: Vec<super::availability::WorkerAvailabilityEvent>,
+    recovery_policy: super::availability::WorkerRecoveryPolicy,
     capture: ReplayCaptureOptions,
     telemetry: Option<(f64, Box<dyn ReplayTelemetryObserver>)>,
     telemetry_capture_interval_ms: Option<f64>,
@@ -358,6 +360,8 @@ impl<C: ReplayComposition> Replayer<C> {
             factory,
             composition,
             runtime_input: None,
+            worker_events: Vec::new(),
+            recovery_policy: super::availability::WorkerRecoveryPolicy::default(),
             capture: ReplayCaptureOptions::default(),
             telemetry: None,
             telemetry_capture_interval_ms: None,
@@ -372,6 +376,20 @@ impl<C: ReplayComposition> Replayer<C> {
     pub fn with_runtime_input(mut self, input: ReplayRuntimeInput) -> Self {
         self.runtime_input = Some(input);
         self
+    }
+
+    /// Inject externally scheduled HPC worker additions and immediate reclamations.
+    /// Currently supported for aggregated replay without an independent planner.
+    pub fn with_worker_availability(
+        mut self,
+        events: Vec<super::availability::WorkerAvailabilityEvent>,
+        recovery: super::availability::WorkerRecoveryPolicy,
+    ) -> ReplayResult<Self> {
+        super::availability::validate_events(&events)
+            .map_err(|error| ReplayError::InvalidSpec(error.to_string()))?;
+        self.worker_events = events;
+        self.recovery_policy = recovery;
+        Ok(self)
     }
 
     /// Configure detailed capture and canonical determinism for this run.
@@ -505,8 +523,23 @@ impl<C: ReplayComposition> Replayer<C> {
             .composition
             .take_scaling_policy()
             .map_err(|error| ReplayError::Scaling(format!("{error:#}")))?;
+        if !self.worker_events.is_empty() && (scaling.is_some()
+            || self.spec.adapters.scaling.provider != "none")
+        {
+            return Err(ReplayError::InvalidSpec(
+                "worker availability trace cannot be combined with planner scaling".into(),
+            ));
+        }
+        if !self.worker_events.is_empty()
+            && !matches!(self.spec.topology, ReplayTopology::Aggregated { .. })
+        {
+            return Err(ReplayError::InvalidSpec(
+                "worker availability trace currently supports only aggregated replay".into(),
+            ));
+        }
         let belady_oracle = if engine_config.kv_eviction_policy == KvEvictionPolicy::Belady {
             if self.spec.max_in_flight.is_some()
+                || !self.worker_events.is_empty()
                 || self.spec.adapters.scaling.provider != "none"
                 || scaling.is_some()
             {
@@ -546,6 +579,13 @@ impl<C: ReplayComposition> Replayer<C> {
                 Some((encoder.clone(), timing.clone()))
             }
         };
+        if !self.worker_events.is_empty()
+            && (self.tokenization.is_some() || self.detokenization.is_some())
+        {
+            return Err(ReplayError::InvalidSpec(
+                "worker availability currently requires disabling separate tokenization and detokenization stages".into(),
+            ));
+        }
         let tokenization = self.tokenization;
         if tokenization.is_some()
             && (scaling.is_some() || self.spec.adapters.scaling.provider != "none")
@@ -563,6 +603,7 @@ impl<C: ReplayComposition> Replayer<C> {
             ));
         }
 
+        let mut availability_stats = None;
         let collector = match &self.spec.topology {
             ReplayTopology::Aggregated { workers } => {
                 let mut role_factory = self.factory.role_factory(
@@ -621,7 +662,8 @@ impl<C: ReplayComposition> Replayer<C> {
                 .with_max_sim_time_ms(self.spec.max_sim_time_ms)
                 .with_encoder(encoder.clone())
                 .with_tokenization(tokenization)
-                .with_detokenization(detokenization);
+                .with_detokenization(detokenization)
+                .with_worker_availability(self.worker_events.clone(), self.recovery_policy);
                 if let Some(sink) = artifact_sink {
                     runtime = runtime.with_artifact_sink(sink);
                 }
@@ -639,7 +681,11 @@ impl<C: ReplayComposition> Replayer<C> {
                         Box::new(TelemetryObserverBoundary(observer)),
                     );
                 }
-                runtime.run().map_err(runtime_error)?.0
+                let (collector, stats) = runtime.run().map_err(runtime_error)?;
+                if !self.worker_events.is_empty() {
+                    availability_stats = Some(stats.availability);
+                }
+                collector
             }
             ReplayTopology::Disaggregated {
                 prefill,
@@ -727,6 +773,7 @@ impl<C: ReplayComposition> Replayer<C> {
         if let Some(capture) = telemetry_capture {
             report.telemetry = Some(capture.finish(&mut report, retain_per_request));
         }
+        report.worker_availability = availability_stats;
         report.kv_eviction_policy = engine_config.kv_eviction_policy;
         report.kv_eviction_assumption = (engine_config.kv_eviction_policy
             == KvEvictionPolicy::Belady)
