@@ -468,6 +468,8 @@ class EngineReplayRunner:
         output_requirements: ReplayOutputRequirements | None = None,
     ) -> ReplayReport:
         output_requirements = output_requirements or ReplayOutputRequirements()
+        if spec.workload.get("hpc") is not None:
+            raise InvalidRunnerError("hpc availability requires --stack dynamo; the engine stack does not support it")
         if self.determinism not in {"random", "canonical_v1"}:
             raise ValueError(f"unsupported replay determinism: {self.determinism!r}")
         if self.determinism != "random" and (
