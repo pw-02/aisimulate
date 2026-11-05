@@ -144,6 +144,30 @@ fn hpc_add_respects_worker_startup_delay() {
 }
 
 #[test]
+fn hpc_reclaim_during_startup_does_not_unregister_unready_worker() {
+    let (collector, stats) = runtime_with_startup_time(
+        VecDeque::from([request(103, 20.0)]), Some(10.0),
+    ).with_worker_availability(
+        vec![
+            WorkerAvailabilityEvent {
+                time_ms: 0.0,
+                change: WorkerAvailabilityAction::Add { count: 1 },
+            },
+            WorkerAvailabilityEvent {
+                time_ms: 5.0,
+                change: WorkerAvailabilityAction::Reclaim { worker_ids: vec![1] },
+            },
+        ],
+        WorkerRecoveryPolicy::default(),
+    ).run().unwrap();
+    let report = collector.finish();
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(stats.availability.added_workers, 1);
+    assert_eq!(stats.availability.reclaimed_workers, 1);
+    assert_eq!(stats.availability.interrupted_attempts, 0);
+}
+
+#[test]
 fn telemetry_only_timestamps_do_not_enter_the_agg_semantic_drain() {
     let pending = VecDeque::from([request(1, 10.0)]);
     let (_, baseline_stats) = runtime(pending.clone()).run().unwrap();
