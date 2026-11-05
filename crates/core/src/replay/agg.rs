@@ -1005,7 +1005,7 @@ where
         }
         for original in restart {
             let session = original.replay_context.as_ref()
-                .and_then(|context| context.session_id())
+                .and_then(|context| context.session_id.as_deref())
                 .map(str::to_owned);
             self.assign_request(
                 ReplayRequestPayload::materialized(original),
