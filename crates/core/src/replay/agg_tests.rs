@@ -99,6 +99,28 @@ fn hpc_reclaim_runtime(
 }
 
 #[test]
+fn hpc_add_only_completes_requests_without_reclamation() {
+    let events = vec![WorkerAvailabilityEvent {
+        time_ms: 0.0,
+        change: WorkerAvailabilityAction::Add { count: 1 },
+    }];
+    let (collector, stats) = runtime_with_startup_time(
+        VecDeque::from([request(103, 20.0), request(104, 25.0)]),
+        Some(5.0),
+    )
+    .with_worker_availability(events, WorkerRecoveryPolicy::default())
+    .run()
+    .unwrap();
+    let report = collector.finish();
+    assert_eq!(report.request_counts.num_requests, 2);
+    assert_eq!(report.request_counts.completed_requests, 2);
+    assert_eq!(stats.availability.added_workers, 1);
+    assert_eq!(stats.availability.reclaimed_workers, 0);
+    assert_eq!(stats.availability.interrupted_attempts, 0);
+    assert_eq!(stats.availability.permanently_failed_requests, 0);
+}
+
+#[test]
 fn hpc_reclaimed_request_fails_without_retry() {
     let (collector, stats) = hpc_reclaim_runtime(
         VecDeque::from([request(100, 0.0)]),
