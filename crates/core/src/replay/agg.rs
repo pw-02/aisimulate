@@ -1243,9 +1243,7 @@ where
             SimulationEventKind::WorkerReady { worker_id, .. } => !failed.contains(worker_id),
             _ => true,
         });
-        for topology in topologies {
-            placements.extend(self.placement.worker_removed(topology, self.now_ms)?);
-        }
+        // Retire per-request placement state before unregistering the worker.
         // Clear any retained FPM metrics from the lost workers.
         for &worker_id in worker_ids {
             self.fpm_buffer.retire_worker(worker_id);
@@ -1284,6 +1282,9 @@ where
                     self.step_freed_slot = true;
                 }
             }
+        }
+        for topology in topologies {
+            placements.extend(self.placement.worker_removed(topology, self.now_ms)?);
         }
         self.dispatch_placements(placements)?;
         let released = self.placement.topology_settled(self.now_ms)?;
