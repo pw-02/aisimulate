@@ -1291,11 +1291,14 @@ where
         // Fresh admission through the same production Dynamo selection policy.
         // registered=true avoids double-counting user arrivals in E4.
         for request in restart {
+            let session_id = request.replay_context.as_ref()
+                .and_then(|context| context.session_id())
+                .map(str::to_owned);
             self.assign_request(
                 ReplayRequestPayload::materialized(request),
                 self.now_ms,
                 Metadata::from_hashes(None),
-                None,
+                session_id,
                 true,
             )?;
         }
