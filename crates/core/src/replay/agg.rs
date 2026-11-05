@@ -1222,6 +1222,8 @@ where
     fn apply_immediate_reclaim(&mut self, worker_ids: &[usize]) -> anyhow::Result<()> {
         self.stats.availability.reclaim_events += 1;
         self.stats.availability.reclaimed_workers += worker_ids.len();
+        // Capture the starting state before forced removal for lifecycle evidence.
+        let starting_before = self.engine.starting_group_ids();
         // Capture topology before the engine destroys the workers.
         let topologies = worker_ids.iter().map(|&id| {
             self.engine.worker_topology(id)
@@ -1285,6 +1287,21 @@ where
         }
         for topology in topologies {
             placements.extend(self.placement.worker_removed(topology, self.now_ms)?);
+        }
+        if self.evidence.options().capture_lifecycle_evidence {
+            let transitions = worker_ids.iter().map(|&worker_id| WorkerLifecycleTransition {
+                worker_id,
+                transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                prior_state: Some(if starting_before.contains(&worker_id) { "starting" } else { "active" }),
+                state: "removed",
+                reason: Some("reclaimed"),
+                origin_operation_ordinal: None,
+            }).collect();
+            let state = self.lifecycle_state();
+            self.evidence.record_lifecycle_operation(
+                self.now_ms, WorkerPool::Agg, "worker_reclaim",
+                None, None, transitions, state, Vec::new(),
+            );
         }
         self.dispatch_placements(placements)?;
         let released = self.placement.topology_settled(self.now_ms)?;
