@@ -1232,7 +1232,9 @@ where
         // Workers must be removed from every routing pool before any reroute.
         let mut placements = Vec::new();
         for topology in &topologies {
-            placements.extend(self.placement.worker_draining(topology.clone(), self.now_ms)?);
+            if !starting_before.contains(&topology.worker_id) {
+                placements.extend(self.placement.worker_draining(topology.clone(), self.now_ms)?);
+            }
         }
         let interrupted = self.engine.force_remove_workers(worker_ids)?;
         self.stats.availability.interrupted_attempts += interrupted.len();
@@ -1286,7 +1288,10 @@ where
             }
         }
         for topology in topologies {
-            placements.extend(self.placement.worker_removed(topology, self.now_ms)?);
+            // Workers reclaimed during startup were never registered with routing.
+            if !starting_before.contains(&topology.worker_id) {
+                placements.extend(self.placement.worker_removed(topology, self.now_ms)?);
+            }
         }
         if self.evidence.options().capture_lifecycle_evidence {
             let transitions = worker_ids.iter().map(|&worker_id| WorkerLifecycleTransition {
