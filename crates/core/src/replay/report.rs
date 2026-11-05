@@ -1912,6 +1912,18 @@ impl TraceCollector {
         }
     }
 
+    /// Discard output from an interrupted execution attempt while retaining
+    /// the logical request's original arrival time and identity. Recovery work
+    /// must not be counted as a second user request or concatenate two outputs.
+    pub(crate) fn on_full_request_restart(&mut self, uuid: Uuid) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.token_timeline = TokenTimeline::default();
+            stats.ttft_milestones = TtftMilestoneTimes::default();
+            stats.decode_worker_idx = None;
+            stats.prefill_worker_idx = None;
+        }
+    }
+
     pub fn on_terminal(&mut self, uuid: Uuid, terminal_time_ms: f64, status: ReplayTerminalStatus) {
         let Self {
             requests,
