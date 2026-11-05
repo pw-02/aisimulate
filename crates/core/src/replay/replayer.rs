@@ -579,6 +579,13 @@ impl<C: ReplayComposition> Replayer<C> {
                 Some((encoder.clone(), timing.clone()))
             }
         };
+        if !self.worker_events.is_empty()
+            && (self.tokenization.is_some() || self.detokenization.is_some())
+        {
+            return Err(ReplayError::InvalidSpec(
+                "worker availability currently requires disabling separate tokenization and detokenization stages".into(),
+            ));
+        }
         let tokenization = self.tokenization;
         if tokenization.is_some()
             && (scaling.is_some() || self.spec.adapters.scaling.provider != "none")
