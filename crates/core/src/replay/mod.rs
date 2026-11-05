@@ -160,7 +160,7 @@ pub use protocol::{
 pub use protocol::{AuthoredKvHints, ForwardPassSnapshot};
 #[doc(hidden)]
 pub use replayer::ReplayRuntimeInput;
-pub use availability::{WorkerAvailabilityAction, WorkerAvailabilityEvent, WorkerRecoveryMode, WorkerRecoveryPolicy};
+pub use availability::{WorkerAvailabilityAction, WorkerAvailabilityEvent, WorkerRecoveryMode, WorkerRecoveryPolicy, WorkerAvailabilityStats};
 pub use replayer::{ReplayComposition, Replayer, RoundRobinComposition};
 #[doc(hidden)]
 pub use report::TraceCollector;
