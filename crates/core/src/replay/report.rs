@@ -39,6 +39,8 @@ pub struct G2DomainStats {
 /// Canonical replay result returned by [`crate::replay::Replayer`].
 #[derive(Debug, Clone)]
 pub struct ReplayReport {
+    /// None for ordinary replay; present for availability-trace experiments.
+    pub worker_availability: Option<super::availability::WorkerAvailabilityStats>,
     /// Opt-in all-phase native observation capture; independent of summary epochs.
     pub telemetry: Option<super::telemetry::ReplayTelemetryCapture>,
     pub kv_eviction_policy: crate::engine::KvEvictionPolicy,
@@ -479,6 +481,9 @@ impl Serialize for ReplayReport {
             power.validate().map_err(serde::ser::Error::custom)?;
         }
         let mut map = serializer.serialize_map(None)?;
+        if let Some(stats) = &self.worker_availability {
+            map.serialize_entry("worker_availability", stats)?;
+        }
         if let Some(telemetry) = &self.telemetry {
             map.serialize_entry("telemetry", telemetry)?;
         }
@@ -2270,6 +2275,7 @@ impl TraceCollector {
             output_throughput_tok_s: goodput_output_tokens as f64 / duration_s,
         });
         ReplayReport {
+            worker_availability: None,
             telemetry: None,
             kv_eviction_policy: crate::engine::KvEvictionPolicy::Lru,
             kv_eviction_assumption: None,
