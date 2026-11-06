@@ -37,6 +37,7 @@ class HpcPredictionConfig(StrictModel):
     ] = "realistic_transient"
     availability_trace: str | None = None
     extra_workers: int = Field(default=0, ge=0)
+    instant_startup: bool | None = None
     reclamation: Literal["immediate", "ignored"] = "immediate"
     recovery: Literal["none", "full_request_restart"] = "none"
     max_restarts: int = Field(default=0, ge=0)
