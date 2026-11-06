@@ -973,3 +973,21 @@ fn agg_first_step_settles_initial_scaling_and_zero_delay_worker_startup() {
     assert!(stepped.events.iter().all(|event| event.at_ms > 0.0));
     assert!(stepped.next_timestamps().1.unwrap() > 0.0);
 }
+
+
+#[test]
+fn hpc_oracle_reclaim_drains_without_losing_inflight_request() {
+    let events = vec![WorkerAvailabilityEvent {
+        time_ms: 0.5,
+        change: WorkerAvailabilityAction::ReclaimGracefully { worker_ids: vec![0] },
+    }];
+    let (collector, stats) = runtime(VecDeque::from([request(205, 0.0)]))
+        .with_worker_availability(events, WorkerRecoveryPolicy::default())
+        .run()
+        .unwrap();
+    let report = collector.finish();
+    assert_eq!(stats.availability.reclaimed_workers, 1);
+    assert_eq!(stats.availability.interrupted_attempts, 0);
+    assert_eq!(stats.availability.permanently_failed_requests, 0);
+    assert_eq!(report.request_counts.completed_requests, 1);
+}
