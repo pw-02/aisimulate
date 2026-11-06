@@ -306,6 +306,8 @@ pub struct Replayer<C = RoundRobinComposition> {
     composition: C,
     runtime_input: Option<ReplayRuntimeInput>,
     worker_events: Vec<super::availability::WorkerAvailabilityEvent>,
+    /// Tracks an explicitly configured HPC replay even when the event trace is empty.
+    availability_enabled: bool,
     recovery_policy: super::availability::WorkerRecoveryPolicy,
     capture: ReplayCaptureOptions,
     telemetry: Option<(f64, Box<dyn ReplayTelemetryObserver>)>,
@@ -357,6 +359,7 @@ impl<C: ReplayComposition> Replayer<C> {
             composition,
             runtime_input: None,
             worker_events: Vec::new(),
+            availability_enabled: false,
             recovery_policy: super::availability::WorkerRecoveryPolicy::default(),
             capture: ReplayCaptureOptions::default(),
             telemetry: None,
@@ -382,6 +385,7 @@ impl<C: ReplayComposition> Replayer<C> {
         super::availability::validate_events(&events)
             .map_err(|error| ReplayError::InvalidSpec(error.to_string()))?;
         self.worker_events = events;
+        self.availability_enabled = true;
         self.recovery_policy = recovery;
         Ok(self)
     }
@@ -603,7 +607,7 @@ impl<C: ReplayComposition> Replayer<C> {
                     );
                 }
                 let (collector, stats) = runtime.run().map_err(runtime_error)?;
-                if !self.worker_events.is_empty() {
+                if self.availability_enabled {
                     availability_stats = Some(stats.availability);
                 }
                 collector
