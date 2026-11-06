@@ -1418,7 +1418,7 @@ mod generated_replay_tests {
         let baseline = Replayer::new(input, ReplayEngineFactory::new())
             .unwrap()
             .with_runtime_input(make())
-            .with_worker_availability(vec![], super::availability::WorkerRecoveryPolicy::default())
+            .with_worker_availability(vec![], crate::replay::availability::WorkerRecoveryPolicy::default())
             .unwrap()
             .run()
             .unwrap();
