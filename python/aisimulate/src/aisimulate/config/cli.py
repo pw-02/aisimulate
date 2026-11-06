@@ -32,17 +32,28 @@ from .traffic import (
 class HpcPredictionConfig(StrictModel):
     """Trace-driven opportunistic worker availability (Dynamo stack only)."""
 
-    availability_trace: str
+    scenario: Literal[
+        "persistent_only", "ideal_elasticity", "perfect_transient", "realistic_transient"
+    ] = "realistic_transient"
+    availability_trace: str | None = None
+    extra_workers: int = Field(default=0, ge=0)
     reclamation: Literal["immediate", "ignored"] = "immediate"
     recovery: Literal["none", "full_request_restart"] = "none"
     max_restarts: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _validate_recovery(self) -> HpcPredictionConfig:
-        if not self.availability_trace.strip():
-            raise ValueError("hpc.availability_trace must not be empty")
-        if self.recovery == "full_request_restart" and self.reclamation != "immediate":
-            raise ValueError("full_request_restart requires immediate reclamation")
+        if self.scenario in {"perfect_transient", "realistic_transient"}:
+            if not self.availability_trace or not self.availability_trace.strip():
+                raise ValueError("transient scenarios require hpc.availability_trace")
+        if self.scenario == "ideal_elasticity" and self.extra_workers <= 0:
+            raise ValueError("ideal_elasticity requires hpc.extra_workers > 0")
+        if self.scenario == "perfect_transient" and self.recovery != "none":
+            raise ValueError("perfect_transient uses graceful oracle reclamation, not restart")
+        if self.recovery == "full_request_restart" and (
+            self.scenario != "realistic_transient" or self.reclamation != "immediate"
+        ):
+            raise ValueError("full_request_restart requires realistic_transient with immediate reclamation")
         if self.recovery == "full_request_restart" and self.max_restarts == 0:
             raise ValueError("full_request_restart requires positive max_restarts")
         return self
