@@ -1096,10 +1096,43 @@ where
                 WorkerAvailabilityAction::Reclaim { worker_ids } => {
                     self.reclaim_workers(&worker_ids)?;
                 }
+                WorkerAvailabilityAction::ReclaimGracefully { worker_ids } => {
+                    self.gracefully_reclaim_workers(&worker_ids)?;
+                }
             }
             changed = true;
         }
         Ok(changed)
+    }
+
+    /// Optimistic upper-bound reclaim: stop new placement immediately, allow
+    /// in-flight requests to complete before releasing a worker.  The worker
+    /// may occupy its GPU beyond the external availability deadline, so this
+    /// is not a deployable preemption policy or a strict-capacity oracle.
+    fn gracefully_reclaim_workers(&mut self, worker_ids: &[usize]) -> anyhow::Result<()> {
+        let starting = self.engine.starting_group_ids();
+        let mut released = Vec::new();
+        for &id in worker_ids {
+            let topology = self.engine.worker_topology(id)
+                .with_context(|| format!("cannot gracefully reclaim worker {id}"))?;
+            anyhow::ensure!(
+                !starting.contains(&id),
+                "oracle graceful reclaim requires ready workers; worker {id} is starting"
+            );
+            anyhow::ensure!(
+                self.engine.active_group_ids().contains(&id),
+                "worker {id} is not active for oracle graceful reclaim"
+            );
+            self.engine.mark_for_removal(id);
+            released.extend(self.placement.worker_draining(topology, self.now_ms)?);
+        }
+        self.collector.clear_static_worker_count();
+        self.stats.availability.reclaim_events += 1;
+        self.stats.availability.reclaimed_workers += worker_ids.len();
+        self.dispatch_placements(released)?;
+        let settled = self.placement.topology_settled(self.now_ms)?;
+        self.dispatch_placements(settled)?;
+        Ok(())
     }
 
     fn reclaim_workers(&mut self, worker_ids: &[usize]) -> anyhow::Result<()> {
