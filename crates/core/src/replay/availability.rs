@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 pub enum WorkerAvailabilityAction {
     Add { count: usize },
     Reclaim { worker_ids: Vec<usize> },
+    /// Oracle: stop new assignments at reclaim time, but finish in-flight work.
+    /// This may overrun the nominal availability window.
+    ReclaimGracefully { worker_ids: Vec<usize> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,7 +58,8 @@ pub(crate) fn validate_events(events: &[WorkerAvailabilityEvent]) -> anyhow::Res
             WorkerAvailabilityAction::Add { count } => {
                 anyhow::ensure!(*count > 0, "worker Add count must be positive");
             }
-            WorkerAvailabilityAction::Reclaim { worker_ids } => {
+            WorkerAvailabilityAction::Reclaim { worker_ids }
+            | WorkerAvailabilityAction::ReclaimGracefully { worker_ids } => {
                 anyhow::ensure!(!worker_ids.is_empty(), "worker Reclaim IDs cannot be empty");
                 let unique = worker_ids.iter().copied().collect::<std::collections::BTreeSet<_>>();
                 anyhow::ensure!(unique.len() == worker_ids.len(), "duplicate worker Reclaim ID");
