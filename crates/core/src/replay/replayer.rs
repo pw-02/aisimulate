@@ -1404,6 +1404,32 @@ mod generated_replay_tests {
     }
 
     #[test]
+    fn explicit_empty_hpc_availability_emits_zero_stats_but_normal_replay_omits_field() {
+        let mut input = spec(Backend::Vllm, false, 1, false);
+        input.max_in_flight = None;
+        let make = || ReplayRuntimeInput::Requests(vec![request(0)]);
+        let normal = Replayer::new(input.clone(), ReplayEngineFactory::new())
+            .unwrap()
+            .with_runtime_input(make())
+            .run()
+            .unwrap();
+        assert!(normal.worker_availability.is_none());
+
+        let baseline = Replayer::new(input, ReplayEngineFactory::new())
+            .unwrap()
+            .with_runtime_input(make())
+            .with_worker_availability(vec![], super::availability::WorkerRecoveryPolicy::default())
+            .unwrap()
+            .run()
+            .unwrap();
+        let stats = baseline.worker_availability.expect("explicit baseline stats");
+        assert_eq!(stats.added_workers, 0);
+        assert_eq!(stats.reclaimed_workers, 0);
+        assert_eq!(stats.interrupted_attempts, 0);
+        assert_eq!(stats.permanently_failed_requests, 0);
+    }
+
+    #[test]
     fn non_round_robin_placement_reports_provider_before_config() {
         let mut spec = spec(Backend::Vllm, false, 1, false);
         spec.adapters.placement = crate::replay::ProviderSpec {
